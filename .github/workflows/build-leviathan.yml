@@ -40,7 +40,8 @@ jobs:
           msbuild vrc-fish.sln `
             /p:Configuration=Release `
             /p:Platform=x64 `
-            /p:PlatformToolset=v143
+            /p:PlatformToolset=v143 `
+            /p:UseOfMfc=false
 
       - name: Prepare test package
         shell: pwsh
