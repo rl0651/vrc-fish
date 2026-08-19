@@ -23,6 +23,27 @@ jobs:
           git apply --recount --check patches/leviathan-track-validation.patch
           git apply --recount patches/leviathan-track-validation.patch
 
+      - name: Tune Leviathan search ROI
+        shell: pwsh
+        run: |
+          $p = 'engine/fish_engine.cpp'
+          $s = Get-Content -Raw $p
+          $old = 'const cv::Rect searchRoi = centerThirdStripRoi(gray.size());'
+          $new = @'
+          cv::Rect searchRoi = centerThirdStripRoi(gray.size());
+          // Leviathan occupies the right side of the normal central search strip.
+          // The actual minigame UI is consistently to its left, so exclude the
+          // rightmost third during initial track acquisition. Bite detection is
+          // unaffected because it happens before this state.
+          if (!loop.hasFixedTrack && searchRoi.width > 0) {
+              searchRoi.width = std::max(1, (searchRoi.width * 2) / 3);
+          }
+          '@
+          if (-not $s.Contains($old)) { throw 'searchRoi anchor not found' }
+          $s = $s.Replace($old, $new.Trim())
+          $s = $s.Replace('static_cast<int>(candidateRoi.height * 0.60)', 'static_cast<int>(candidateRoi.height * 0.25)')
+          Set-Content -Path $p -Value $s -NoNewline
+
       - name: Restore relic templates
         shell: pwsh
         run: |
@@ -61,6 +82,8 @@ jobs:
 
           Changes:
           - rejects track-template matches unless fish/relic and a brightness-derived slider corroborate them
+          - initial track search excludes the rightmost third of the normal search strip to avoid Leviathan rod occlusion
+          - rejects implausibly tall slider detections during track verification
           - requires the same candidate for two frames before locking
           - includes relic templates as fish_icon_alt11.png and fish_icon_alt12.png
           - fishing physics remain at the repository defaults
