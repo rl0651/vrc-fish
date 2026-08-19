@@ -20,8 +20,8 @@ jobs:
       - name: Apply Leviathan source patch
         shell: pwsh
         run: |
-          git apply --check patches/leviathan-track-validation.patch
-          git apply patches/leviathan-track-validation.patch
+          git apply --recount --check patches/leviathan-track-validation.patch
+          git apply --recount patches/leviathan-track-validation.patch
 
       - name: Restore relic templates
         shell: pwsh
