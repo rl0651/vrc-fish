@@ -1,0 +1,75 @@
+name: Build Leviathan Fix
+
+on:
+  push:
+    branches:
+      - leviathan-fix
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply Leviathan source patch
+        shell: pwsh
+        run: |
+          git apply --check patches/leviathan-track-validation.patch
+          git apply patches/leviathan-track-validation.patch
+
+      - name: Restore relic templates
+        shell: pwsh
+        run: |
+          $b64a = Get-Content -Raw patches/relic_alt11.png.b64
+          [IO.File]::WriteAllBytes("Resource-VRChat/fish_icon_alt11.png", [Convert]::FromBase64String($b64a.Trim()))
+          $b64b = Get-Content -Raw patches/relic_alt12.png.b64
+          [IO.File]::WriteAllBytes("Resource-VRChat/fish_icon_alt12.png", [Convert]::FromBase64String($b64b.Trim()))
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          msbuild vrc-fish.sln `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:PlatformToolset=v143
+
+      - name: Prepare test package
+        shell: pwsh
+        run: |
+          $staging = "dist\vrc-fish-leviathan-fix"
+          New-Item -ItemType Directory -Force $staging | Out-Null
+
+          Copy-Item .\vrc-fish.exe, .\config.ini, `
+            .\opencv_core460.dll, .\opencv_highgui460.dll, .\opencv_imgcodecs460.dll, `
+            .\opencv_imgproc460.dll, .\opencv_videoio460.dll `
+            -Destination $staging -Force
+
+          Copy-Item .\Resource-VRChat -Destination $staging -Recurse -Force
+
+          @"
+          Leviathan + relic test build
+
+          Changes:
+          - rejects track-template matches unless fish/relic and a brightness-derived slider corroborate them
+          - requires the same candidate for two frames before locking
+          - includes relic templates as fish_icon_alt11.png and fish_icon_alt12.png
+          - fishing physics remain at the repository defaults
+
+          Run vrc-fish.exe normally. Do not use the old limiter or -220/-320 camera shift.
+          "@ | Set-Content "$staging\LEVIATHAN_FIX.txt"
+
+      - name: Upload test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrc-fish-leviathan-fix
+          path: dist/vrc-fish-leviathan-fix/
+          if-no-files-found: error
