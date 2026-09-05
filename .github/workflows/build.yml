@@ -19,8 +19,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply Pharaoh recovery patch
-        run: git apply --verbose pharaoh_recovery.patch
+      - name: Apply Pharaoh recovery source changes
+        run: python scripts/apply_pharaoh_recovery.py
         shell: pwsh
 
       - name: Use high-mobility fish jump threshold
