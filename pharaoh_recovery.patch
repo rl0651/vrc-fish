@@ -69,7 +69,9 @@ diff --git a/engine/fish_engine.cpp b/engine/fish_engine.cpp
 +		}
 +		const int suspiciousOutside = std::max(30, det.sliderHeight / 2);
 +		const bool staleSuspicious = loop.stableFishFrames >= 6 && outsideDistance > suspiciousOutside;
-+		const bool periodicVerify = loop.fastDetectFrames >= 24;
++		// Full detection is much more expensive than the cached path, so keep
++		// periodic verification sparse. The stale watchdog above reacts quickly.
++		const bool periodicVerify = loop.fastDetectFrames >= 180;
 +
 +		if (staleSuspicious || periodicVerify) {
 +			FishSliderResult fullDet{};
@@ -122,7 +124,7 @@ diff --git a/engine/fish_engine.cpp b/engine/fish_engine.cpp
  		if (fishJump > config.fish_jump_threshold) {
 -			det.fishY = loop.prevFishY;
 +			// A single large displacement may be a false template hit, but difficult
-+			// fish can genuinely jump a long way.  Instead of freezing forever at the
++			// fish can genuinely jump a long way. Instead of freezing forever at the
 +			// previous Y, require the new location to be seen again by a FULL detector.
 +			int tolerance = config.fish_jump_threshold / 2;
 +			if (tolerance < 20) tolerance = 20;
