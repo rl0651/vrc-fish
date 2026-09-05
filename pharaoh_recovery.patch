@@ -1,0 +1,167 @@
+diff --git a/engine/fish_engine.cpp b/engine/fish_engine.cpp
+--- a/engine/fish_engine.cpp
++++ b/engine/fish_engine.cpp
+@@ -51,6 +51,11 @@ struct FishEngine::LoopState {
+ 	double cachedTrackAngle{};
+ 	int cachedFishTplIdx{};
+ 	bool hasCachedFishTpl{};
++	int fastDetectFrames{};
++	int stableFishFrames{};
++	int pendingFishY{};
++	int pendingFishFrames{};
++	bool hasPendingFish{};
+ 	int recordFrame{};
+ 	std::deque<int> pressWindow;
+ };
+@@ -280,6 +285,11 @@ void FishEngine::runEnterMinigameStep(LoopState& loop) const {
+ 	loop.lastGoodSliderCY = 0;
+ 	loop.hasLastGoodPos = false;
+ 	loop.consecutiveMiss = 0;
++	loop.fastDetectFrames = 0;
++	loop.stableFishFrames = 0;
++	loop.pendingFishY = 0;
++	loop.pendingFishFrames = 0;
++	loop.hasPendingFish = false;
+ 
+ 	if (config.ml_mode == 1) {
+ 		loop.recordFrame = 0;
+@@ -440,6 +450,7 @@ void FishEngine::runControlMinigameStep(LoopState& loop, const cv::Mat& frame, const cv::Mat& gray) const {
+ 		if (ok) {
+ 			loop.cachedFishTplIdx = bestIdx;
+ 			loop.hasCachedFishTpl = true;
++			loop.fastDetectFrames = 0;
+ 		}
+ 		didFullDetect = true;
+ 	} else {
+@@ -454,6 +465,9 @@ void FishEngine::runControlMinigameStep(LoopState& loop, const cv::Mat& frame, const cv::Mat& gray) const {
+ 			loop.cachedFishTplIdx,
+ 			&det);
++		if (ok) {
++			loop.fastDetectFrames++;
++		}
+ 		if (!ok) {
+ 			int bestIdx = 0;
+ 			ok = detectFishAndSliderFull(
+@@ -468,10 +482,65 @@ void FishEngine::runControlMinigameStep(LoopState& loop, const cv::Mat& frame, const cv::Mat& gray) const {
+ 			if (ok) {
+ 				loop.cachedFishTplIdx = bestIdx;
++				loop.fastDetectFrames = 0;
+ 			}
+ 			didFullDetect = true;
+ 		}
+ 	}
++
++	// The cached fast template can occasionally latch onto a static false match.
++	// Periodically verify it with the full multi-template detector, and verify
++	// sooner if the reported fish is essentially frozen well outside the slider.
++	if (ok && !didFullDetect) {
++		if (loop.hasPrevFish && std::abs(det.fishY - loop.prevFishY) <= 2) {
++			loop.stableFishFrames++;
++		} else {
++			loop.stableFishFrames = 0;
++		}
++
++		int outsideDistance = 0;
++		if (det.fishY < det.sliderTop) {
++			outsideDistance = det.sliderTop - det.fishY;
++		} else if (det.fishY > det.sliderBottom) {
++			outsideDistance = det.fishY - det.sliderBottom;
++		}
++		const int suspiciousOutside = std::max(30, det.sliderHeight / 2);
++		const bool staleSuspicious = loop.stableFishFrames >= 6 && outsideDistance > suspiciousOutside;
++		const bool periodicVerify = loop.fastDetectFrames >= 24;
++
++		if (staleSuspicious || periodicVerify) {
++			FishSliderResult fullDet{};
++			int bestIdx = 0;
++			const bool fullOk = detectFishAndSliderFull(
++				gray,
++				matchRoi,
++				runtime_.templates(),
++				config,
++				loop.cachedTrackScale,
++				loop.cachedTrackAngle,
++				&fullDet,
++				&bestIdx);
++			didFullDetect = true;
++
++			if (fullOk) {
++				const int oldFishY = det.fishY;
++				det = fullDet;
++				loop.cachedFishTplIdx = bestIdx;
++				loop.hasCachedFishTpl = true;
++				loop.fastDetectFrames = 0;
++				loop.stableFishFrames = 0;
++				if ((staleSuspicious || std::abs(det.fishY - oldFishY) > 20) &&
++					(config.vr_debug || runtime_.hasVrLogFile())) {
++					std::ostringstream oss;
++					oss << "[recover] full fish verify oldY=" << oldFishY
++						<< " newY=" << det.fishY
++						<< " tpl=" << bestIdx
++						<< (staleSuspicious ? " stale" : " periodic");
++					writeVrLogLine(oss.str(), config.vr_debug);
++				}
++			} else {
++				// Do not remain permanently committed to a suspicious cached template.
++				// Keep this frame's fast result, but force a full search next frame.
++				loop.hasCachedFishTpl = false;
++				loop.fastDetectFrames = 0;
++				loop.stableFishFrames = 0;
++			}
++		}
++	}
+ 
+ 	const unsigned long long detectMs = nowMs() - loopStart;
+ 
+@@ -527,11 +596,53 @@ void FishEngine::runControlMinigameStep(LoopState& loop, const cv::Mat& frame, const cv::Mat& gray) const {
+ 	}
+ 
+ 	if (loop.hasPrevFish) {
+-		const int fishJump = std::abs(det.fishY - loop.prevFishY);
++		const int fishJump = std::abs(det.fishY - loop.prevFishY);
+ 		if (fishJump > config.fish_jump_threshold) {
+-			det.fishY = loop.prevFishY;
++			// A single large displacement may be a false template hit, but difficult
++			// fish can genuinely jump a long way.  Instead of freezing forever at the
++			// previous Y, require the new location to be seen again by a FULL detector.
++			int tolerance = config.fish_jump_threshold / 2;
++			if (tolerance < 20) tolerance = 20;
++
++			const bool confirmsPending = didFullDetect && loop.hasPendingFish &&
++				std::abs(det.fishY - loop.pendingFishY) <= tolerance;
++
++			if (confirmsPending) {
++				if (config.vr_debug || runtime_.hasVrLogFile()) {
++					std::ostringstream oss;
++					oss << "[recover] confirmed fish jump oldY=" << loop.prevFishY
++						<< " newY=" << det.fishY
++						<< " jump=" << fishJump;
++					writeVrLogLine(oss.str(), config.vr_debug);
++				}
++				loop.hasPendingFish = false;
++				loop.pendingFishFrames = 0;
++				// Do not turn the accepted teleport into a huge velocity/acceleration spike.
++				loop.hasPrevFish = false;
++				loop.smoothFishVel = 0.0;
++				loop.prevSmoothFishVel = 0.0;
++				loop.smoothFishAccel = 0.0;
++				loop.hasPrevDeviation = false;
++			} else {
++				loop.pendingFishY = det.fishY;
++				loop.pendingFishFrames++;
++				loop.hasPendingFish = true;
++				// Force the next frame through the all-template detector so a real
++				// high-speed jump is accepted quickly, while a one-frame false hit is not.
++				loop.hasCachedFishTpl = false;
++				det.fishY = loop.prevFishY;
++			}
++		} else {
++			loop.hasPendingFish = false;
++			loop.pendingFishFrames = 0;
+ 		}
++	} else {
++		loop.hasPendingFish = false;
++		loop.pendingFishFrames = 0;
+ 	}
+ 
+ 	if (det.sliderHeight >= config.slider_height_stable_min) {
